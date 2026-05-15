@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
 """
-ContentStudio Auto-Scheduler
-Reads posts marked "Ready" from a SharePoint-synced Excel file,
-runs automated QA checks, schedules them in ContentStudio,
-and emails jhammy@ringringmarketing.com on any failure.
+ContentStudio Post QA Checker
+Reads rows marked "Ready" from the Excel scheduler.
+For each row, fetches the existing post from ContentStudio using the Post Link,
+runs deep QA checks, updates Status to "Approved" or "QA Failed", and sends a
+summary email.
+
+Checks per platform:
+  YouTube   — video filename, thumbnail filename, title (vs Word doc), copy (vs Word doc),
+               title text visible on thumbnail image, schedule time, AI grammar
+  Facebook  — video filename, copy (vs Word doc), schedule time, AI grammar
+  LinkedIn  — video filename, copy (vs Word doc), schedule time, AI grammar
+  Instagram — video filename, copy (vs Word doc), schedule time, AI grammar
+  X         — thumbnail filename, title text on thumbnail, copy (vs Word doc),
+               schedule time, AI grammar
 """
 
+import base64
 import os
 import re
 import smtplib
+import urllib.parse
 import requests
 import pytz
+import docx as docxlib
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -23,52 +36,124 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 CS_API_KEY   = os.getenv("CONTENTSTUDIO_API_KEY")
 CS_API_BASE  = "https://api.contentstudio.io/api/v1"
-EXCEL_PATH   = os.getenv("EXCEL_PATH")          # Local path to your synced SharePoint Excel file
+EXCEL_PATH   = os.getenv("EXCEL_PATH")
 NOTIFY_EMAIL = os.getenv("NOTIFICATION_EMAIL", "jhammy@ringringmarketing.com")
 SMTP_HOST    = os.getenv("SMTP_HOST", "smtp.office365.com")
 SMTP_PORT    = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER    = os.getenv("SMTP_USER")           # Your Microsoft 365 email
-SMTP_PASS    = os.getenv("SMTP_PASS")           # Your Microsoft 365 password or app password
+SMTP_USER    = os.getenv("SMTP_USER")
+SMTP_PASS    = os.getenv("SMTP_PASS")
 
 anthropic = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # ── Workspace Mapping ─────────────────────────────────────────────────────────
 WORKSPACE_MAP = {
-    "Ring Ring Marketing":    "ring-ring-marketing",
-    "RRM@home":               "rrmathome",
+    "Ring Ring Marketing":       "ring-ring-marketing",
+    "RRM@home":                  "rrmathome",
     "Senior Care Marketing Max": "senior-care-marketing-max",
-    "Home Care Post":         "home-care-post",
+    "Home Care Post":            "home-care-post",
 }
 
-# ── Platform Limits ───────────────────────────────────────────────────────────
-CHAR_LIMITS = {
-    "Instagram": 2200,
-    "Facebook":  63206,
-    "LinkedIn":  3000,
-    "Twitter":   280,
-    "TikTok":    2200,
+# ── Platform Rules ────────────────────────────────────────────────────────────
+PLATFORM_RULES = {
+    "youtube":   {"needs_video": True,  "needs_thumbnail": True,  "needs_title": True},
+    "facebook":  {"needs_video": True,  "needs_thumbnail": False, "needs_title": False},
+    "linkedin":  {"needs_video": True,  "needs_thumbnail": False, "needs_title": False},
+    "instagram": {"needs_video": True,  "needs_thumbnail": False, "needs_title": False},
+    "x":         {"needs_video": False, "needs_thumbnail": True,  "needs_title": False},
+    "twitter":   {"needs_video": False, "needs_thumbnail": True,  "needs_title": False},
 }
 
-HASHTAG_LIMITS = {
-    "Instagram": 30,
-    "Facebook":  10,
-    "LinkedIn":  5,
-    "Twitter":   5,
-    "TikTok":    20,
+# ── Word Doc Section Mapping ──────────────────────────────────────────────────
+BASE_SEARCH_DIRS = [
+    r"D:\Ring Ring Marketing\Ring Ring Marketing\Messaging & Content Team - Personal Branding Videos",
+    r"D:\Ring Ring Marketing\OneDrive - Ring Ring Marketing\RRM - In-House Marketing Initiatives - 2026",
+]
+
+PLATFORM_SECTION_MAP = {
+    "facebook":  "Facebook and LinkedIn",
+    "linkedin":  "Facebook and LinkedIn",
+    "instagram": "Facebook and LinkedIn",
+    "x":         "X",
+    "twitter":   "X",
+    "youtube":   "YouTube/ Website",
 }
+
+SECTION_HEADERS = ["Facebook and LinkedIn", "X", "YouTube/ Website"]
+SKIP_LABELS     = {"title", "body", "tags", "yt link", "youtube tags"}
 
 TIMEZONE_MAP = {
-    "PST": "America/Los_Angeles",
-    "PDT": "America/Los_Angeles",
-    "MST": "America/Denver",
-    "MDT": "America/Denver",
-    "CST": "America/Chicago",
-    "CDT": "America/Chicago",
-    "EST": "America/New_York",
-    "EDT": "America/New_York",
+    "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
+    "MST": "America/Denver",      "MDT": "America/Denver",
+    "CST": "America/Chicago",     "CDT": "America/Chicago",
+    "EST": "America/New_York",    "EDT": "America/New_York",
 }
 
-PLACEHOLDER_RE = re.compile(r'\[.*?\]|\{.*?\}|<[A-Z].*?>')
+
+# ── File Search ───────────────────────────────────────────────────────────────
+def find_file(filename):
+    name_lower = filename.strip().lower()
+    for base in BASE_SEARCH_DIRS:
+        if not os.path.isdir(base):
+            continue
+        for root, _, files in os.walk(base):
+            for f in files:
+                if f.lower() == name_lower:
+                    return os.path.join(root, f)
+                if os.path.splitext(f)[0].lower() == name_lower:
+                    return os.path.join(root, f)
+    return None
+
+
+# ── Word Doc Parsing ──────────────────────────────────────────────────────────
+def read_platform_copy(docx_path, platform):
+    """Return (title, copy, hashtags) for the given platform from a Word doc."""
+    target_section = PLATFORM_SECTION_MAP.get(platform.lower())
+    if not target_section:
+        raise ValueError(f"No section mapped for platform '{platform}'")
+
+    doc = docxlib.Document(docx_path)
+    paragraphs = [p.text.strip() for p in doc.paragraphs]
+
+    in_section    = False
+    next_is_title = False
+    title_text    = ""
+    copy_lines    = []
+    hashtag_lines = []
+
+    for para in paragraphs:
+        stripped      = para.rstrip("─ \t–—")
+        is_any_header = any(h.lower() in stripped.lower() for h in SECTION_HEADERS)
+        is_target     = target_section.lower() in stripped.lower()
+
+        if is_any_header:
+            if is_target:
+                in_section = True
+            elif in_section:
+                break
+            continue
+
+        if not in_section or not para:
+            continue
+
+        label = para.lower().rstrip(": ")
+        if label in SKIP_LABELS:
+            if label == "title":
+                next_is_title = True
+            continue
+
+        if next_is_title:
+            title_text    = para
+            next_is_title = False
+            continue
+
+        if para.startswith("#"):
+            hashtag_lines.append(para)
+        else:
+            copy_lines.append(para)
+
+    copy     = "\n\n".join(l for l in copy_lines if l).strip()
+    hashtags = " ".join(hashtag_lines).strip()
+    return title_text, copy, hashtags
 
 
 # ── ContentStudio API ─────────────────────────────────────────────────────────
@@ -80,106 +165,305 @@ def get_workspace_id(slug):
     resp = requests.get(f"{CS_API_BASE}/workspaces", headers=cs_headers(), timeout=15)
     resp.raise_for_status()
     for ws in resp.json().get("data", []):
-        if ws.get("slug") == slug or ws.get("id") == slug:
-            return ws["id"]
-    raise ValueError(f"Workspace '{slug}' not found in ContentStudio")
+        if ws.get("slug") == slug or ws.get("_id") == slug:
+            return ws["_id"]
+    raise ValueError(f"Workspace '{slug}' not found")
 
 
-def get_account_ids(workspace_id, platform):
-    resp = requests.get(
-        f"{CS_API_BASE}/workspaces/{workspace_id}/accounts",
-        headers=cs_headers(), timeout=15
+def extract_post_id(url):
+    if not url:
+        return None
+    url = url.strip()
+    if "plan_ids=" in url:
+        return url.split("plan_ids=")[-1].split("&")[0]
+    return url.rstrip("/").split("/")[-1]
+
+
+def fetch_cs_post(workspace_id, post_id):
+    """Scan paginated posts list to find the post with the given ID."""
+    for page in range(1, 51):
+        resp = requests.get(
+            f"{CS_API_BASE}/workspaces/{workspace_id}/posts",
+            headers=cs_headers(), params={"page": page}, timeout=15
+        )
+        resp.raise_for_status()
+        data  = resp.json()
+        posts = data.get("data", [])
+        for post in posts:
+            if post.get("id") == post_id:
+                return post
+        if not posts or page >= data.get("last_page", 1):
+            break
+    raise ValueError(f"Post {post_id} not found in ContentStudio (checked 50 pages)")
+
+
+# ── Filename Helpers ──────────────────────────────────────────────────────────
+_UUID_RE = re.compile(
+    r'_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE
+)
+
+def _cs_base_name(url):
+    """Extract the original base filename from a ContentStudio storage URL (no UUID, no ext)."""
+    path = urllib.parse.urlparse(url).path.split("?")[0]
+    filename = urllib.parse.unquote(path.split("/")[-1])
+    base = os.path.splitext(filename)[0]
+    base = _UUID_RE.sub("", base)
+    return base.lower().strip()
+
+
+def _filename_matches(url, expected):
+    """Return True if the ContentStudio URL filename matches the expected filename."""
+    cs   = _cs_base_name(url)
+    exp  = os.path.splitext(expected)[0].lower().strip()
+    # Accept if either is a prefix of the other (ContentStudio truncates long names)
+    short = cs if len(cs) < len(exp) else exp
+    long  = exp if len(cs) < len(exp) else cs
+    return long.startswith(short[:max(8, len(short))])
+
+
+# ── AI Comparison Helpers ─────────────────────────────────────────────────────
+def _compare_copy(cs_text, doc_copy, platform):
+    """Return a list of issues if the ContentStudio copy doesn't match the Word doc copy."""
+    if not doc_copy.strip():
+        return []
+    prompt = (
+        f"Compare these two versions of a {platform} social media post.\n\n"
+        f"VERSION A (in ContentStudio):\n{cs_text[:2000]}\n\n"
+        f"VERSION B (from Word doc — expected):\n{doc_copy[:2000]}\n\n"
+        "Are they essentially the same content? "
+        "Minor formatting differences, extra hashtags, or 'INSERT LINK' placeholders are acceptable.\n"
+        "Reply MATCH if the core content is the same.\n"
+        "Reply MISMATCH: followed by a brief one-line explanation if they differ meaningfully."
     )
-    resp.raise_for_status()
-    ids = []
-    for acc in resp.json().get("data", []):
-        acc_type = acc.get("type", "").lower()
-        if platform.lower() in acc_type:
-            ids.append(acc["id"])
-    return ids
-
-
-def schedule_post(workspace_id, account_ids, row):
-    payload = {
-        "content": {
-            "text": f"{row['post_copy']}\n\n{row['hashtags']}".strip(),
-            "media": {"images": [row["image_url"]]} if row["image_url"] else {},
-        },
-        "accounts": account_ids,
-        "scheduling": {
-            "publish_type": "scheduled",
-            "scheduled_at": row["scheduled_at"].strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    }
-    resp = requests.post(
-        f"{CS_API_BASE}/workspaces/{workspace_id}/posts",
-        headers=cs_headers(), json=payload, timeout=30
+    msg = anthropic.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}],
     )
-    resp.raise_for_status()
-    return resp.json()
+    result = msg.content[0].text.strip()
+    if result.upper().startswith("MISMATCH"):
+        explanation = result[8:].lstrip(": ").strip()
+        return [f"Copy mismatch — {explanation}"]
+    return []
 
 
-# ── QA Checks ─────────────────────────────────────────────────────────────────
-def run_qa(row):
-    issues = []
-    copy     = row["post_copy"]
-    hashtags = row["hashtags"]
-    platform = row["platform"]
-    image    = row["image_url"]
-    sched    = row["scheduled_at"]
+def _check_title_on_image(image_url, expected_title):
+    """
+    Download the thumbnail and use Claude vision to verify the title text on it
+    matches the expected title. Returns an issue string or None.
+    """
+    try:
+        img_resp = requests.get(image_url, timeout=30)
+        img_resp.raise_for_status()
+        img_b64    = base64.standard_b64encode(img_resp.content).decode("utf-8")
+        media_type = img_resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+        if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+            media_type = "image/jpeg"
 
-    # Required fields
-    if not copy.strip():
-        issues.append("Post Copy is empty")
-    if not platform.strip():
-        issues.append("Platform is missing")
-    if not row["industry"].strip():
-        issues.append("Industry is missing")
+        prompt = (
+            f"Look at this thumbnail image.\n"
+            f"Expected title: \"{expected_title}\"\n\n"
+            "What title or heading text is displayed on the image?\n"
+            "Reply MATCH if the text on the image matches the expected title (minor differences OK).\n"
+            "Reply MISMATCH: followed by what you actually see on the image if it does not match."
+        )
+        msg = anthropic.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": media_type, "data": img_b64
+                }},
+                {"type": "text", "text": prompt},
+            ]}],
+        )
+        result = msg.content[0].text.strip()
+        if result.upper().startswith("MISMATCH"):
+            explanation = result[8:].lstrip(": ").strip()
+            return f"Thumbnail title mismatch — {explanation}"
+    except Exception as e:
+        return f"Could not check title on thumbnail: {e}"
+    return None
 
-    # Character limit
-    full_text = f"{copy}\n{hashtags}".strip()
-    limit = CHAR_LIMITS.get(platform, 2200)
-    if len(full_text) > limit:
-        issues.append(f"Text too long: {len(full_text)} chars (limit {limit} for {platform})")
 
-    # Hashtag count
-    tags = re.findall(r"#\w+", hashtags)
-    max_tags = HASHTAG_LIMITS.get(platform, 30)
-    if len(tags) > max_tags:
-        issues.append(f"Too many hashtags: {len(tags)} (max {max_tags} for {platform})")
+# ── QA ────────────────────────────────────────────────────────────────────────
+def run_qa(row, cs_post):
+    issues   = []
+    platform = row["platform"].lower()
+    rules    = PLATFORM_RULES.get(platform)
 
-    # Placeholder check
-    if PLACEHOLDER_RE.search(copy):
-        issues.append("Post copy contains unfilled placeholders like [NAME] or {VALUE}")
+    if not rules:
+        issues.append(f"Unknown platform '{row['platform']}'")
+        return issues
 
-    # Future date
-    if sched <= datetime.now(pytz.UTC):
-        issues.append("Scheduled date/time is in the past")
+    # Pull content from the post
+    common  = cs_post.get("common", {})
+    content = common.get("content", {})
+    cs_text = content.get("text", "").strip()
+    media   = content.get("media", {})
+    video   = media.get("video")
+    images  = media.get("images", [])
 
-    # Image URL reachable
-    if image:
-        try:
-            r = requests.head(image, timeout=10, allow_redirects=True)
-            if r.status_code >= 400:
-                issues.append(f"Image URL returned HTTP {r.status_code} — check SharePoint link permissions")
-        except Exception:
-            issues.append("Image URL could not be reached — check the link")
-    else:
-        issues.append("No image URL provided in Image Filename column")
+    # Title from platform-specific override
+    cs_title = content.get("title", "").strip()
+    if not cs_title:
+        for override in cs_post.get("overrides", []):
+            if override.get("platform", "").lower() == platform:
+                cs_title = override.get("content", {}).get("title", "").strip()
+                if cs_title:
+                    break
 
-    # Workspace mapping
-    if row["industry"] not in WORKSPACE_MAP:
-        issues.append(f"Unknown industry '{row['industry']}' — check spelling matches the dropdown")
+    # ── Read Word doc for expected values ────────────────────────────────────
+    docx_filename = row.get("post_copy", "").strip()
+    doc_title, doc_copy, doc_hashtags = "", "", ""
+    if docx_filename:
+        docx_path = find_file(docx_filename)
+        if not docx_path:
+            issues.append(f"Word doc not found: '{docx_filename}'")
+        else:
+            try:
+                doc_title, doc_copy, doc_hashtags = read_platform_copy(docx_path, platform)
+            except Exception as e:
+                issues.append(f"Could not read Word doc: {e}")
 
-    # AI grammar + brand voice check (only if basics pass)
-    if not issues:
-        ai_issues = _ai_qa(copy, platform)
-        issues.extend(ai_issues)
+    # For thumbnail title checks (YouTube and X share the same thumbnail)
+    # Always read the YouTube section for the expected title on the image
+    doc_yt_title = doc_title  # already YouTube title if platform==youtube
+    if platform in ("x", "twitter") and docx_filename:
+        docx_path = find_file(docx_filename)
+        if docx_path:
+            try:
+                doc_yt_title, _, _ = read_platform_copy(docx_path, "youtube")
+            except Exception:
+                pass
+
+    # ── Copy check ───────────────────────────────────────────────────────────
+    if not cs_text:
+        issues.append("Post copy is empty in ContentStudio")
+    elif doc_copy:
+        issues.extend(_compare_copy(cs_text, doc_copy, platform))
+
+    # ── Video check ──────────────────────────────────────────────────────────
+    if rules["needs_video"]:
+        if not video:
+            issues.append("Video is not attached")
+        else:
+            expected_video = row.get("video_file", "").strip()
+            if expected_video:
+                video_url = video.get("url", "") if isinstance(video, dict) else str(video)
+                if not _filename_matches(video_url, expected_video):
+                    cs_name = _cs_base_name(video_url)
+                    issues.append(
+                        f"Video mismatch — expected '{expected_video}', "
+                        f"ContentStudio has '{cs_name}'"
+                    )
+                else:
+                    print(f"    video OK: '{expected_video}'")
+
+    # ── Thumbnail check ───────────────────────────────────────────────────────
+    if rules["needs_thumbnail"]:
+        # YouTube: custom thumbnail is stored in video.thumbnail (the overlay)
+        # X/Twitter: thumbnail is a regular image in images[]
+        if platform in ("youtube",):
+            video_thumb_url = (video.get("thumbnail", "") if isinstance(video, dict) else "") or ""
+            # Auto-generated thumbnails from ContentStudio have random hash filenames
+            # A custom uploaded thumbnail will contain the original filename
+            expected_thumb = row.get("image_filename", "").strip()
+            if not video_thumb_url:
+                issues.append("Thumbnail is not attached")
+            elif expected_thumb and not _filename_matches(video_thumb_url, expected_thumb):
+                cs_name = _cs_base_name(video_thumb_url)
+                issues.append(
+                    f"Thumbnail mismatch — expected '{expected_thumb}', "
+                    f"ContentStudio has '{cs_name}'"
+                )
+            else:
+                print(f"    thumbnail OK: '{expected_thumb or video_thumb_url}'")
+                # Check title text on the thumbnail image
+                check_title = doc_yt_title or cs_title
+                if video_thumb_url and check_title:
+                    print(f"    Checking title on thumbnail image...")
+                    title_issue = _check_title_on_image(video_thumb_url, check_title)
+                    if title_issue:
+                        issues.append(title_issue)
+                    else:
+                        print(f"    thumbnail title OK")
+        else:
+            # X and other platforms: thumbnail is in images[]
+            if not images:
+                issues.append("Thumbnail is not attached")
+            else:
+                thumb_url = images[0] if isinstance(images[0], str) else images[0].get("url", "")
+                expected_thumb = row.get("image_filename", "").strip()
+                if expected_thumb:
+                    if not _filename_matches(thumb_url, expected_thumb):
+                        cs_name = _cs_base_name(thumb_url)
+                        issues.append(
+                            f"Thumbnail mismatch — expected '{expected_thumb}', "
+                            f"ContentStudio has '{cs_name}'"
+                        )
+                    else:
+                        print(f"    thumbnail OK: '{expected_thumb}'")
+                # Check title text on image
+                check_title = doc_yt_title or cs_title
+                if thumb_url and check_title:
+                    print(f"    Checking title on thumbnail image...")
+                    title_issue = _check_title_on_image(thumb_url, check_title)
+                    if title_issue:
+                        issues.append(title_issue)
+                    else:
+                        print(f"    thumbnail title OK")
+
+    # ── Title check (YouTube) ─────────────────────────────────────────────────
+    if rules["needs_title"]:
+        if not cs_title:
+            if doc_title:
+                issues.append(f"Title is missing — expected: '{doc_title}'")
+            else:
+                issues.append("Title is missing")
+        elif doc_title and doc_title.lower() != cs_title.lower():
+            issues.append(
+                f"Title mismatch — expected: '{doc_title}', "
+                f"ContentStudio has: '{cs_title}'"
+            )
+        else:
+            print(f"    title OK: '{cs_title}'")
+
+    # ── Schedule time check ───────────────────────────────────────────────────
+    expected_at = row.get("scheduled_at")
+    if expected_at:
+        sched        = cs_post.get("scheduling", {})
+        execute_time = sched.get("execute_time", "")
+        if not execute_time:
+            issues.append("Post has no scheduled time set in ContentStudio")
+        else:
+            try:
+                cs_dt        = datetime.fromisoformat(execute_time.replace("Z", "+00:00"))
+                diff_minutes = abs((cs_dt - expected_at).total_seconds()) / 60
+                if diff_minutes > 10:
+                    issues.append(
+                        f"Schedule time mismatch — Excel expects "
+                        f"{expected_at.strftime('%Y-%m-%d %H:%M UTC')}, "
+                        f"ContentStudio shows {cs_dt.strftime('%Y-%m-%d %H:%M UTC')}"
+                    )
+                else:
+                    print(f"    schedule OK: {cs_dt.strftime('%Y-%m-%d %H:%M UTC')}")
+            except Exception:
+                pass
+
+    # ── AI grammar check ─────────────────────────────────────────────────────
+    if not issues and cs_text:
+        grammar_issues = _ai_grammar(cs_text, row["platform"])
+        if grammar_issues:
+            issues.extend(grammar_issues)
+        else:
+            print(f"    grammar OK")
 
     return issues
 
 
-def _ai_qa(copy, platform):
+def _ai_grammar(copy, platform):
     prompt = (
         f"Review this {platform} social media post for a professional marketing agency:\n\n"
         f"\"{copy}\"\n\n"
@@ -200,22 +484,35 @@ def _ai_qa(copy, platform):
 
 
 # ── Email ─────────────────────────────────────────────────────────────────────
-def send_failure_email(row, issues):
+def send_summary_email(approved, failed):
+    total = len(approved) + len(failed)
+
+    if not failed:
+        subject = f"All {total} post(s) approved"
+        body    = f"All {total} post(s) passed QA.\n\n"
+        for r in approved:
+            body += f"  OK  {r['industry']} | {r['platform']} — {r['schedule_date']} {r['schedule_time']} {r['timezone']}\n"
+    else:
+        subject = f"{len(approved)} approved, {len(failed)} need attention"
+        body = ""
+        if approved:
+            body += f"{len(approved)} post(s) approved:\n"
+            for r in approved:
+                body += f"  OK  {r['industry']} | {r['platform']} — {r['schedule_date']} {r['schedule_time']} {r['timezone']}\n"
+            body += "\n"
+        body += f"{len(failed)} post(s) failed QA:\n\n"
+        for entry in failed:
+            r = entry["row"]
+            body += f"  FAIL  {r['industry']} | {r['platform']} — {r['schedule_date']} {r['schedule_time']} {r['timezone']}\n"
+            for issue in entry["issues"]:
+                body += f"        - {issue}\n"
+            body += "\n"
+        body += "Fix the issues above, then set Status back to 'Ready' to re-check."
+
     msg = MIMEMultipart()
     msg["From"]    = SMTP_USER
     msg["To"]      = NOTIFY_EMAIL
-    msg["Subject"] = f"[QA Failed] {row['industry']} — {row['platform']} on {row['schedule_date']}"
-
-    body = (
-        f"A post failed QA and was NOT scheduled in ContentStudio.\n\n"
-        f"Industry : {row['industry']}\n"
-        f"Platform : {row['platform']}\n"
-        f"Schedule : {row['schedule_date']} {row['schedule_time']} {row['timezone']}\n\n"
-        f"Issues Found:\n"
-        + "\n".join(f"  • {i}" for i in issues)
-        + f"\n\nPost Copy:\n{row['post_copy']}\n\n"
-        f"Fix the issues above, then set the Status back to 'Ready' to retry."
-    )
+    msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -228,33 +525,27 @@ def send_failure_email(row, issues):
 def read_excel():
     wb = openpyxl.load_workbook(EXCEL_PATH)
     ws = wb.active
-    headers = [cell.value for cell in ws[1]]
+    headers = [cell.value.strip() if cell.value else cell.value for cell in ws[1]]
 
     rows = []
     for i, excel_row in enumerate(ws.iter_rows(min_row=2), start=2):
-        values = []
-        for cell in excel_row:
-            # Pull hyperlink target if present (SharePoint image links)
-            if cell.hyperlink:
-                values.append(cell.hyperlink.target)
-            else:
-                values.append(cell.value)
-
+        values = [cell.value for cell in excel_row]
         if not any(values):
             continue
-
         data = dict(zip(headers, values))
         rows.append({
-            "row_num":      i,
-            "industry":     str(data.get("Industry") or "").strip(),
-            "platform":     str(data.get("Platform") or "").strip(),
-            "post_copy":    str(data.get("Post Copy") or "").strip(),
-            "hashtags":     str(data.get("Hashtags") or "").strip(),
-            "image_url":    str(data.get("Image Filename") or "").strip(),
-            "schedule_date": data.get("Schedule Date"),
-            "schedule_time": data.get("Schedule Time"),
-            "timezone":     str(data.get("Timezone") or "PST").strip(),
-            "status":       str(data.get("Status") or "").strip(),
+            "row_num":        i,
+            "industry":       str(data.get("Industry") or "").strip(),
+            "platform":       str(data.get("Platform") or "").strip(),
+            "post_copy":      str(data.get("Post Copy") or "").strip(),
+            "video_file":     str(data.get("Video File Name") or "").strip(),
+            "image_filename": str(data.get("Image Filename") or "").strip(),
+            "yt_link":        str(data.get("YT Link") or "").strip(),
+            "schedule_date":  data.get("Schedule Date"),
+            "schedule_time":  data.get("Schedule Time"),
+            "timezone":       str(data.get("Timezone") or "PST").strip(),
+            "post_link":      str(data.get("Post Link for Checking") or "").strip(),
+            "status":         str(data.get("Status") or "").strip(),
         })
     return wb, ws, rows, headers
 
@@ -282,7 +573,7 @@ def parse_datetime(date_val, time_val, tz_str):
     if isinstance(time_val, datetime):
         time_part = time_val.time()
     else:
-        for fmt in ("%I:%M %p", "%H:%M", "%I:%M%p"):
+        for fmt in ("%I:%M %p", "%H:%M", "%I:%M%p", "%H:%M:%S"):
             try:
                 time_part = datetime.strptime(str(time_val).strip(), fmt).time()
                 break
@@ -297,7 +588,7 @@ def parse_datetime(date_val, time_val, tz_str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 50)
-    print("ContentStudio Auto-Scheduler")
+    print("ContentStudio Post QA Checker")
     print("=" * 50)
 
     wb, ws, rows, headers = read_excel()
@@ -305,66 +596,74 @@ def main():
     print(f"Found {len(ready)} post(s) marked Ready\n")
 
     workspace_cache = {}
-    account_cache   = {}
-    changes = False
+    approved = []
+    failed   = []
 
     for row in ready:
         label = f"{row['industry']} | {row['platform']} | Row {row['row_num']}"
-        print(f"Processing: {label}")
+        print(f"Checking: {label}")
 
-        # Parse datetime
         try:
             row["scheduled_at"] = parse_datetime(
                 row["schedule_date"], row["schedule_time"], row["timezone"]
             )
         except Exception as e:
             issues = [f"Date/time error: {e}"]
-            print(f"  ✗ {issues[0]}")
+            print(f"  FAIL {issues[0]}")
             update_status(ws, row["row_num"], headers, "QA Failed")
-            send_failure_email(row, issues)
-            changes = True
+            failed.append({"row": row, "issues": issues})
             continue
 
-        # QA checks
-        issues = run_qa(row)
-        if issues:
-            print(f"  ✗ QA Failed ({len(issues)} issue(s))")
-            for iss in issues:
-                print(f"      - {iss}")
+        if not row["post_link"]:
+            issues = ["Post Link for Checking is missing"]
+            print(f"  FAIL {issues[0]}")
             update_status(ws, row["row_num"], headers, "QA Failed")
-            send_failure_email(row, issues)
-            changes = True
+            failed.append({"row": row, "issues": issues})
             continue
 
-        # Schedule in ContentStudio
-        slug = WORKSPACE_MAP[row["industry"]]
+        post_id = extract_post_id(row["post_link"])
+        slug    = WORKSPACE_MAP.get(row["industry"])
+        if not slug:
+            issues = [f"Unknown industry '{row['industry']}'"]
+            print(f"  FAIL {issues[0]}")
+            update_status(ws, row["row_num"], headers, "QA Failed")
+            failed.append({"row": row, "issues": issues})
+            continue
+
         try:
             if slug not in workspace_cache:
                 workspace_cache[slug] = get_workspace_id(slug)
             workspace_id = workspace_cache[slug]
 
-            cache_key = f"{workspace_id}_{row['platform']}"
-            if cache_key not in account_cache:
-                account_cache[cache_key] = get_account_ids(workspace_id, row["platform"])
-            account_ids = account_cache[cache_key]
+            print(f"  Fetching post {post_id}...")
+            cs_post = fetch_cs_post(workspace_id, post_id)
 
-            if not account_ids:
-                raise ValueError(f"No {row['platform']} account connected in workspace '{slug}'")
+            issues = run_qa(row, cs_post)
 
-            schedule_post(workspace_id, account_ids, row)
-            update_status(ws, row["row_num"], headers, "Scheduled")
-            print(f"  ✓ Scheduled for {row['scheduled_at'].strftime('%Y-%m-%d %H:%M UTC')}")
-            changes = True
+            if issues:
+                print(f"  FAIL ({len(issues)} issue(s))")
+                for iss in issues:
+                    print(f"      - {iss}")
+                update_status(ws, row["row_num"], headers, "QA Failed")
+                failed.append({"row": row, "issues": issues})
+            else:
+                print(f"  OK Approved")
+                update_status(ws, row["row_num"], headers, "Approved")
+                approved.append(row)
 
         except Exception as e:
-            print(f"  ✗ Scheduling error: {e}")
+            print(f"  FAIL Error: {e}")
             update_status(ws, row["row_num"], headers, "QA Failed")
-            send_failure_email(row, [f"Scheduling error: {e}"])
-            changes = True
+            failed.append({"row": row, "issues": [str(e)]})
 
-    if changes:
+    if approved or failed:
         wb.save(EXCEL_PATH)
-        print(f"\nExcel file saved: {EXCEL_PATH}")
+        print(f"\nExcel saved: {EXCEL_PATH}")
+        try:
+            send_summary_email(approved, failed)
+            print(f"Summary email sent to {NOTIFY_EMAIL}")
+        except Exception as e:
+            print(f"Email failed (fix SMTP AUTH): {e}")
 
     print("\nDone.")
 
