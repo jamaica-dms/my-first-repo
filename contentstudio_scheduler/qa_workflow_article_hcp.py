@@ -378,6 +378,11 @@ def phase3_contentstudio(date_str, sheet_data, img_path, docx_path):
             continue
 
         post = found[label]
+
+        # Standalone check — each channel must be its own separate post
+        post_account_count = len(post.get("accounts", []))
+        log(post_account_count == 1, "Post is standalone (not grouped)",
+            f"Grouped with {post_account_count - 1} other channel(s)" if post_account_count > 1 else "")
         dt  = datetime.fromisoformat(post["scheduling"]["execute_time"].replace("Z", "+00:00"))
         pst = dt - PST_OFFSET
 
