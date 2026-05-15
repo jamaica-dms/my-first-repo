@@ -92,12 +92,16 @@ def compare_images(web_url, local_path):
         return False, f"Image comparison error: {e}"
 
 
+# Global results tracker
+_results = []
+
 def log(passed, label, detail=""):
     icon = "[PASS]" if passed else "[FAIL]"
     line = f"  {icon} {label}"
     if detail:
         line += f" — {detail}"
     print(line)
+    _results.append((passed, label, detail))
     return passed
 
 
@@ -465,9 +469,31 @@ def main():
     img_path, docx_path = phase2_folder_and_website(sheet_data)
     phase3_contentstudio(date_str, sheet_data, img_path, docx_path)
 
-    print("\n" + "-" * 58)
-    print("  QA Complete")
-    print("-" * 58)
+    # ── Final Report ─────────────────────────────────────────────────────────
+    failures = [(label, detail) for passed, label, detail in _results if not passed]
+    total    = len(_results)
+    passed_n = total - len(failures)
+
+    print("\n" + "=" * 58)
+    print(f"  REPORT — {date_str}")
+    print("=" * 58)
+    print(f"  Article : {sheet_data['title'][:55]}...")
+    print(f"  Checks  : {passed_n}/{total} passed")
+    print()
+
+    if not failures:
+        print("  RESULT: POSTING IS CORRECT — all checks passed.")
+    else:
+        print("  RESULT: POSTING HAS ISSUES — fix before approving.")
+        print()
+        print("  What needs fixing:")
+        for label, detail in failures:
+            line = f"    - {label}"
+            if detail:
+                line += f": {detail}"
+            print(line)
+
+    print("=" * 58)
 
 
 if __name__ == "__main__":
