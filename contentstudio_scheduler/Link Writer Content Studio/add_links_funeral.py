@@ -289,7 +289,7 @@ def main():
             if "linkedin" in platforms and "facebook" in platforms:
                 post_id  = post["id"]
                 welton_li = links.get("Welton LI", "")
-                post_text = post.get("message", "") or post.get("content", "")
+                post_text = post.get("common", {}).get("content", {}).get("text", "")
                 candidate = get_rrm_linkedin_via_playwright(post_id, welton_li, post_text)
                 if candidate:
                     links["RRM LI"] = candidate
