@@ -292,11 +292,11 @@ def parse_word_doc(docx_path):
 
     # Section boundaries
     fb_li_m = re.search(
-        r"Facebook and LinkedIn[:\s]*\n(.*?)(?=\nX\b|\nInstagram\b|\nTags\b)",
+        r"Facebook and LinkedIn[:\s]*\n(.*?)(?=\nX\b|\nTwitter\b|\nInstagram\b|\nTags\b)",
         text, re.DOTALL | re.IGNORECASE,
     )
     x_m = re.search(
-        r"\nX[:\s]*\n(.*?)(?=\nInstagram\b|\nTags\b|\n\w+ on |\nPhoto\b|\nPicture\b|\Z)",
+        r"\n(?:X|Twitter)[:\s]*\n(.*?)(?=\nInstagram\b|\nTags\b|\n\w+ on |\nPhoto\b|\nPicture\b|\Z)",
         text, re.DOTALL,
     )
     ig_m = re.search(
