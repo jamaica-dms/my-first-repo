@@ -1,0 +1,29 @@
+name: Home Care Blog Link Writer
+
+on:
+  schedule:
+    - cron: '15 19 * * 1'  # Every Monday 19:15 UTC = 12:15 PM PDT (UTC-7)
+  workflow_dispatch:
+
+jobs:
+  write-links:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install gspread google-auth playwright
+          playwright install chromium
+
+      - name: Run Home Care link writer
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: |
+          python "contentstudio_scheduler/Link Writer Content Studio/add_links_home_care.py"
