@@ -38,9 +38,9 @@ CHANNEL_MAP = {
     "Welton LI":  ("linkedin",  "Welton Hong"),
     "SCMM LI":    ("linkedin",  "Senior Care"),
     "Welton X":   ("twitter",   "weltonhong"),
-    "SCMM X":     ("twitter",   "Senior Care"),
+    "SCMM X":     ("twitter",   "SeniorCareMax"),
     "Welton IG":  ("instagram", "Welton Hong"),
-    "SCMM IG":    ("instagram", "Senior Care"),
+    "SCMM IG":    ("instagram", "SeniorCare"),
 }
 
 
