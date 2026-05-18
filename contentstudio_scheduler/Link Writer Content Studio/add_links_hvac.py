@@ -166,11 +166,14 @@ def _load_creds_info():
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-    def fix_key(m):
-        key = m.group(2).replace('\r\n', '\\n').replace('\r', '').replace('\n', '\\n')
-        return m.group(1) + key + m.group(3)
-    fixed = re.sub(r'("private_key"\s*:\s*")([\s\S]*?)(")', fix_key, raw)
-    return json.loads(fixed)
+    # GitHub Actions sometimes converts \n JSON escapes to backslash + actual newline byte,
+    # producing an invalid escape sequence. Strip the stray backslash so the newline byte
+    # passes through, then allow all control characters with strict=False.
+    fixed = re.sub(r'\\(\r?\n)', r'\1', raw)
+    try:
+        return json.loads(fixed, strict=False)
+    except json.JSONDecodeError:
+        return json.loads(fixed.replace('\r', ''), strict=False)
 
 
 def get_worksheet():
