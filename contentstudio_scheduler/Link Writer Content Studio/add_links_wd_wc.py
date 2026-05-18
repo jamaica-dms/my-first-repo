@@ -191,7 +191,7 @@ def find_row_number(worksheet, date_str):
         return None
 
     for i in range(date_row_idx, min(date_row_idx + 15, len(rows))):
-        if len(rows[i]) > 2 and "window" in rows[i][2].lower():
+        if len(rows[i]) > 2 and "wd/wc" in rows[i][2].lower():
             return i + 1
 
     return None
