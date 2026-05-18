@@ -10,6 +10,7 @@ Post slot: 9 AM PDT (16:00 UTC).
 import sys
 import json
 import os
+import time
 import urllib.request
 from datetime import datetime
 
@@ -23,6 +24,9 @@ WS_ID       = "6871327b366a03cd260d3441"  # Home Care Post
 
 SHEET_ID    = "1Kslp63_DcckDguJW_ABipaC-Vdl5FzFVhGRUWYd6tSc"
 SHEET_GID   = "1930398898"
+
+CS_EMAIL    = "jhammy@ringringmarketing.com"
+CS_PASSWORD = "RRM2023"
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -83,6 +87,64 @@ def extract_links(posts):
                     if url:
                         links[label] = url
     return links
+
+
+# ── Playwright — get HCP LinkedIn link ────────────────────────────────────────
+def get_hcp_linkedin_via_playwright(post_id, post_text=""):
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [WARN] Playwright not installed — HCP LI link skipped.")
+        return None
+
+    post_url = f"https://app.contentstudio.io/home-care-post/publisher/planner/list-view?plan_ids={post_id}"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        page.goto("https://app.contentstudio.io/login")
+        time.sleep(3)
+        page.keyboard.press("Escape")
+        time.sleep(1)
+        page.fill('input[placeholder="Email Address"]', CS_EMAIL)
+        page.fill('input[placeholder="Password"]', CS_PASSWORD)
+        page.press('input[placeholder="Password"]', "Enter")
+        time.sleep(6)
+
+        page.goto(post_url)
+        time.sleep(6)
+
+        clicked = False
+        if post_text:
+            snippet = post_text.strip()[:60]
+            for attempt_text in [snippet, snippet[:40], snippet[:25]]:
+                try:
+                    page.click(f'text={attempt_text}', timeout=4000)
+                    time.sleep(4)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+        if not clicked:
+            for selector in ["td .post-content", "tbody tr td:nth-child(2)", "tbody tr"]:
+                try:
+                    page.click(selector, timeout=3000)
+                    time.sleep(4)
+                    break
+                except Exception:
+                    continue
+        time.sleep(2)
+
+        li_links = [
+            a.get_attribute("href")
+            for a in page.query_selector_all('a[href*="linkedin.com"]')
+            if a.get_attribute("href")
+        ]
+        browser.close()
+
+    return li_links[0] if li_links else None
 
 
 # ── Google Sheets helpers ──────────────────────────────────────────────────────
@@ -219,13 +281,24 @@ def main():
     for label, url in links.items():
         print(f"  {label}: {url}")
 
+    if "HCP LI" not in links:
+        print("\nHCP LI not in API — fetching via Playwright...")
+        for post in hcp_posts:
+            platforms = [a["platform"] for a in post.get("accounts", [])]
+            if "linkedin" in platforms:
+                post_id   = post["id"]
+                post_text = post.get("common", {}).get("content", {}).get("text", "")
+                candidate = get_hcp_linkedin_via_playwright(post_id, post_text)
+                if candidate:
+                    links["HCP LI"] = candidate
+                print(f"  HCP LI: {links.get('HCP LI', 'NOT FOUND')}")
+                break
+        time.sleep(5)
+
     print("\nConnecting to Google Sheet...")
     spreadsheet, worksheet = get_worksheet()
 
     print("\nFinding row in Google Sheet...")
-    rows_preview = worksheet.get_all_values()
-    for idx, r in enumerate(rows_preview[:8]):
-        print(f"  Row {idx+1}: {r[:6]}")
     row_num = find_row_number(worksheet, date_str)
     if not row_num:
         print(f"[STOP] Could not find row for {date_str} in sheet.")

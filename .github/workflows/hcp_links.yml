@@ -19,7 +19,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install gspread google-auth
+          pip install gspread google-auth playwright
+          playwright install chromium
 
       - name: Run Home Care Post link writer
         env:
