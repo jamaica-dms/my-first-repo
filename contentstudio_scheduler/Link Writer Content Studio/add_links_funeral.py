@@ -219,14 +219,19 @@ def write_links_to_sheet(row_num, links, existing=None):
         time.sleep(6)
 
         for cell_ref, channel_links in columns.items():
-            valid = [(text, url) for text, url in channel_links if url]
-            if not valid:
+            valid_urls = {text: url for text, url in channel_links if url}
+            if not valid_urls:
                 print(f"  [SKIP] {cell_ref} — no links available")
                 continue
 
-            has_existing = bool(existing.get(cell_ref, "").strip())
-            mode = "append" if has_existing else "replace"
-            print(f"  Writing {cell_ref} [{mode}]: {[t for t, _ in valid]}")
+            existing_text = existing.get(cell_ref, "").strip()
+            # Build ordered label list from existing cell text, preserving labels like Welton PFB
+            if existing_text:
+                labels = [lbl.strip() for lbl in existing_text.split(",") if lbl.strip()]
+            else:
+                labels = list(valid_urls.keys())
+
+            print(f"  Writing {cell_ref}: {labels}")
 
             name_box = page.locator('[id="t-name-box"], .name-box, [aria-label*="Name Box"]').first
             name_box.click(timeout=5000)
@@ -235,29 +240,28 @@ def write_links_to_sheet(row_num, links, existing=None):
             page.keyboard.press("Enter")
             time.sleep(1)
 
+            # Clear and rewrite — preserves Welton PFB as plain text, others get hyperlinks
             page.keyboard.press("F2")
             time.sleep(0.5)
-            if has_existing:
-                # Move to end of existing content and add separator
-                page.keyboard.press("End")
-                time.sleep(0.2)
-                page.keyboard.type(", ")
-            else:
-                page.keyboard.press("Control+a")
+            page.keyboard.press("Control+a")
             time.sleep(0.3)
 
-            for i, (text, url) in enumerate(valid):
+            for i, label in enumerate(labels):
                 if i > 0:
                     page.keyboard.type(", ")
-                page.keyboard.type(text)
-                for _ in range(len(text)):
-                    page.keyboard.press("Shift+ArrowLeft")
-                time.sleep(0.3)
-                page.keyboard.press("Control+k")
-                time.sleep(2)
-                page.keyboard.type(url)
-                page.keyboard.press("Enter")
-                time.sleep(1)
+                url = valid_urls.get(label)
+                if url:
+                    page.keyboard.type(label)
+                    for _ in range(len(label)):
+                        page.keyboard.press("Shift+ArrowLeft")
+                    time.sleep(0.3)
+                    page.keyboard.press("Control+k")
+                    time.sleep(2)
+                    page.keyboard.type(url)
+                    page.keyboard.press("Enter")
+                    time.sleep(1)
+                else:
+                    page.keyboard.type(label)
 
             page.keyboard.press("Enter")
             time.sleep(1)
