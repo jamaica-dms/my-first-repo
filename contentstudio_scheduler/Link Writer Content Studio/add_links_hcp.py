@@ -105,10 +105,16 @@ def get_worksheet():
 
 def find_row_number(worksheet, date_str):
     """Find the 1-based row number for date_str in column A."""
-    sheet_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d")
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    candidates = {
+        dt.strftime("%m/%d"),
+        dt.strftime("%-m/%-d"),
+        dt.strftime("%m/%d/%Y"),
+        dt.strftime("%-m/%-d/%Y"),
+    }
     rows = worksheet.get_all_values()
     for i, row in enumerate(rows):
-        if row[0].strip() == sheet_date:
+        if row[0].strip() in candidates:
             return i + 1
     return None
 
