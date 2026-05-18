@@ -135,14 +135,18 @@ def _load_creds_info():
     import re
     raw = os.environ["GOOGLE_CREDENTIALS_JSON"].lstrip('﻿')
     try:
-        return json.loads(raw)
+        info = json.loads(raw)
     except json.JSONDecodeError:
-        pass
-    fixed = re.sub(r'\\(\r?\n)', r'\1', raw)
-    try:
-        return json.loads(fixed, strict=False)
-    except json.JSONDecodeError:
-        return json.loads(fixed.replace('\r', ''), strict=False)
+        fixed = re.sub(r'\\(\r?\n)', r'\1', raw)
+        try:
+            info = json.loads(fixed, strict=False)
+        except json.JSONDecodeError:
+            info = json.loads(fixed.replace('\r', ''), strict=False)
+    if 'private_key' in info:
+        pk = info['private_key']
+        pk = pk.replace('\\n', '\n').replace('\r\n', '\n').replace('\r', '\n')
+        info['private_key'] = pk
+    return info
 
 
 def get_worksheet():

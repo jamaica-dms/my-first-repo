@@ -163,17 +163,19 @@ def _load_creds_info():
     import re
     raw = os.environ["GOOGLE_CREDENTIALS_JSON"].lstrip('﻿')
     try:
-        return json.loads(raw)
+        info = json.loads(raw)
     except json.JSONDecodeError:
-        pass
-    # GitHub Actions sometimes converts \n JSON escapes to backslash + actual newline byte,
-    # producing an invalid escape sequence. Strip the stray backslash so the newline byte
-    # passes through, then allow all control characters with strict=False.
-    fixed = re.sub(r'\\(\r?\n)', r'\1', raw)
-    try:
-        return json.loads(fixed, strict=False)
-    except json.JSONDecodeError:
-        return json.loads(fixed.replace('\r', ''), strict=False)
+        fixed = re.sub(r'\\(\r?\n)', r'\1', raw)
+        try:
+            info = json.loads(fixed, strict=False)
+        except json.JSONDecodeError:
+            info = json.loads(fixed.replace('\r', ''), strict=False)
+    # Ensure private_key has actual newlines (not literal \n two-char sequences)
+    if 'private_key' in info:
+        pk = info['private_key']
+        pk = pk.replace('\\n', '\n').replace('\r\n', '\n').replace('\r', '\n')
+        info['private_key'] = pk
+    return info
 
 
 def get_worksheet():
