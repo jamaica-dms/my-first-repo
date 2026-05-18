@@ -163,21 +163,9 @@ def get_rrm_linkedin_via_playwright(post_id, welton_li_url, post_text=""):
 
 # ── Google Sheets helpers ──────────────────────────────────────────────────────
 def _load_creds_info():
-    import re
-    raw = os.environ["GOOGLE_CREDENTIALS_JSON"].lstrip('﻿')
-    try:
-        info = json.loads(raw)
-    except json.JSONDecodeError:
-        fixed = re.sub(r'\\(\r?\n)', r'\1', raw)
-        try:
-            info = json.loads(fixed, strict=False)
-        except json.JSONDecodeError:
-            info = json.loads(fixed.replace('\r', ''), strict=False)
-    if 'private_key' in info:
-        pk = info['private_key']
-        pk = pk.replace('\\n', '\n').replace('\r\n', '\n').replace('\r', '\n')
-        info['private_key'] = pk
-    return info
+    import base64
+    raw = os.environ["GOOGLE_CREDENTIALS_JSON"].strip()
+    return json.loads(base64.b64decode(raw).decode("utf-8"))
 
 
 def get_worksheet():
