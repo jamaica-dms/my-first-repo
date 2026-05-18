@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
 Cemetery Blog — Live Link Writer
-Runs every Monday at 7:15 AM PST.
+Runs every Monday at 7:15 AM PST via GitHub Actions.
 Pulls live post links from ContentStudio and writes them to the PB Blogs 2026 Google Sheet.
 """
 
 import sys
 import json
-import csv
-import io
-import re
+import os
 import time
 import urllib.request
-import urllib.error
 from datetime import datetime, timedelta
+
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 CS_API_KEY  = "cs_bd757a81fb4869ba556922297a3601033b337f8feb97421acad22a3ca70f3369"
@@ -22,16 +22,14 @@ WS_ID       = "66be2a6a2c16646ddc0d01c7"  # Ring Ring Marketing
 
 SHEET_ID    = "1Kslp63_DcckDguJW_ABipaC-Vdl5FzFVhGRUWYd6tSc"
 SHEET_GID   = "42049175"
-SHEET_URL   = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit?gid={SHEET_GID}#{SHEET_GID}"
 
 CS_EMAIL    = "jhammy@ringringmarketing.com"
 CS_PASSWORD = "RRM2023"
 
-EDGE_PROFILE = r"C:\Users\Jhammy\AppData\Local\Microsoft\Edge\User Data"
-
 PST_OFFSET  = timedelta(hours=7)  # UTC-7 (PDT); change to 8 in standard time
 
-# Channel → (platform fragment, name fragment)
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
 CHANNEL_MAP = {
     "Welton FB": ("facebook", "Welton Hong"),
     "RRM FB":    ("facebook", "Ring Ring Marketing"),
@@ -105,7 +103,6 @@ def get_rrm_linkedin_via_playwright(post_id):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Login
         page.goto("https://app.contentstudio.io/login")
         time.sleep(3)
         page.keyboard.press("Escape")
@@ -115,7 +112,6 @@ def get_rrm_linkedin_via_playwright(post_id):
         page.press('input[placeholder="Password"]', "Enter")
         time.sleep(6)
 
-        # Navigate to post and open details
         page.goto(post_url)
         time.sleep(6)
         try:
@@ -124,7 +120,6 @@ def get_rrm_linkedin_via_playwright(post_id):
             pass
         time.sleep(4)
 
-        # Find all LinkedIn links
         li_links = [
             a.get_attribute("href")
             for a in page.query_selector_all('a[href*="linkedin.com"]')
@@ -132,89 +127,102 @@ def get_rrm_linkedin_via_playwright(post_id):
         ]
         browser.close()
 
-    # The Welton LI link is already known from the API — return the other one
     return li_links[0] if li_links else None
 
 
-# ── Google Sheet helpers ───────────────────────────────────────────────────────
-def find_row_number(date_str):
+# ── Google Sheets helpers ──────────────────────────────────────────────────────
+def get_worksheet():
+    creds = Credentials.from_service_account_info(
+        json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"]),
+        scopes=SCOPES,
+    )
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SHEET_ID)
+    for ws in spreadsheet.worksheets():
+        if str(ws.id) == SHEET_GID:
+            return spreadsheet, ws
+    raise ValueError(f"Worksheet with gid {SHEET_GID} not found")
+
+
+def find_row_number(worksheet, date_str):
     """Find the 1-based row number for the Cemetery row on date_str."""
     sheet_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d")
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={SHEET_GID}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        content = r.read().decode("utf-8", errors="replace")
-    rows = list(csv.reader(io.StringIO(content)))
+    rows = worksheet.get_all_values()
     for i, row in enumerate(rows):
         if row[0].strip() == sheet_date and "cemetery" in " ".join(row).lower():
             return i + 1
     return None
 
 
-def write_links_to_sheet(row_num, links):
-    """Use Edge + Playwright to write hyperlinks into F, G, H, I of row_num."""
-    from playwright.sync_api import sync_playwright
+def write_hyperlink_cell(spreadsheet, row_num, col_letter, items):
+    """Write items as rich text with hyperlinks into a single cell via Sheets API."""
+    col_idx = ord(col_letter.upper()) - ord('A')
+    row_idx = row_num - 1
 
-    # Map sheet columns to channel pairs
+    full_text = ""
+    format_runs = []
+
+    for i, (text, url) in enumerate(items):
+        if i > 0:
+            sep_start = len(full_text)
+            full_text += ", "
+            format_runs.append({"startIndex": sep_start, "format": {}})
+
+        item_start = len(full_text)
+        full_text += text
+
+        if url:
+            format_runs.append({
+                "startIndex": item_start,
+                "format": {
+                    "link": {"uri": url},
+                    "underline": True,
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 0.067, "green": 0.329, "blue": 0.651}
+                    }
+                }
+            })
+        else:
+            format_runs.append({"startIndex": item_start, "format": {}})
+
+    spreadsheet.batch_update({
+        "requests": [{
+            "updateCells": {
+                "rows": [{
+                    "values": [{
+                        "userEnteredValue": {"stringValue": full_text},
+                        "textFormatRuns": format_runs
+                    }]
+                }],
+                "fields": "userEnteredValue,textFormatRuns",
+                "range": {
+                    "sheetId": int(SHEET_GID),
+                    "startRowIndex": row_idx,
+                    "endRowIndex": row_idx + 1,
+                    "startColumnIndex": col_idx,
+                    "endColumnIndex": col_idx + 1
+                }
+            }
+        }]
+    })
+
+
+def write_links_to_sheet(spreadsheet, row_num, links):
     columns = {
-        f"F{row_num}": [("Welton FB", links.get("Welton FB")), ("RRM FB", links.get("RRM FB"))],
-        f"G{row_num}": [("Welton LI", links.get("Welton LI")), ("RRM LI", links.get("RRM LI"))],
-        f"H{row_num}": [("Welton X",  links.get("Welton X")),  ("RRM X",  links.get("RRM X"))],
-        f"I{row_num}": [("Welton IG", links.get("Welton IG"))],
+        "F": [("Welton FB", links.get("Welton FB")), ("RRM FB", links.get("RRM FB"))],
+        "G": [("Welton LI", links.get("Welton LI")), ("RRM LI", links.get("RRM LI"))],
+        "H": [("Welton X",  links.get("Welton X")),  ("RRM X",  links.get("RRM X"))],
+        "I": [("Welton IG", links.get("Welton IG"))],
     }
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=EDGE_PROFILE,
-            channel="msedge",
-            headless=True,
-            args=["--profile-directory=Default"],
-        )
-        page = browser.pages[0] if browser.pages else browser.new_page()
-        page.set_viewport_size({"width": 1800, "height": 900})
-        page.goto(SHEET_URL)
-        time.sleep(6)
+    for col, channel_links in columns.items():
+        valid = [(text, url) for text, url in channel_links if url]
+        if not valid:
+            print(f"  [SKIP] {col}{row_num} — no links available")
+            continue
+        print(f"  Writing {col}{row_num}: {[t for t, _ in valid]}")
+        write_hyperlink_cell(spreadsheet, row_num, col, valid)
 
-        for cell_ref, channel_links in columns.items():
-            # Filter out missing links
-            valid = [(text, url) for text, url in channel_links if url]
-            if not valid:
-                print(f"  [SKIP] {cell_ref} — no links available")
-                continue
-
-            print(f"  Writing {cell_ref}: {[t for t, _ in valid]}")
-
-            # Navigate to cell
-            name_box = page.locator('[id="t-name-box"], .name-box, [aria-label*="Name Box"]').first
-            name_box.click(timeout=5000)
-            page.keyboard.press("Control+a")
-            page.keyboard.type(cell_ref)
-            page.keyboard.press("Enter")
-            time.sleep(1)
-
-            # Enter edit mode and clear
-            page.keyboard.press("F2")
-            time.sleep(0.5)
-            page.keyboard.press("Control+a")
-            time.sleep(0.3)
-
-            for i, (text, url) in enumerate(valid):
-                if i > 0:
-                    page.keyboard.type(", ")
-                page.keyboard.type(text)
-                for _ in range(len(text)):
-                    page.keyboard.press("Shift+ArrowLeft")
-                time.sleep(0.3)
-                page.keyboard.press("Control+k")
-                time.sleep(2)
-                page.keyboard.type(url)
-                page.keyboard.press("Enter")
-                time.sleep(1)
-
-            page.keyboard.press("Enter")
-            time.sleep(1)
-
-        browser.close()
     print("  Sheet updated.")
 
 
@@ -222,12 +230,10 @@ def write_links_to_sheet(row_num, links):
 def main():
     if len(sys.argv) >= 2:
         date_str = sys.argv[1]
-        # Accept MM/DD format
         if "/" in date_str:
             m, d = date_str.split("/")
             date_str = f"2026-{m.zfill(2)}-{d.zfill(2)}"
     else:
-        # Default to today
         date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     try:
@@ -241,7 +247,6 @@ def main():
     print(f"  Date: {date_str}")
     print("=" * 58)
 
-    # 1 — Fetch ContentStudio posts
     print("\nFetching posts from ContentStudio...")
     all_posts = fetch_all_posts()
     cemetery_posts = get_cemetery_posts(date_str, all_posts)
@@ -251,42 +256,38 @@ def main():
         print("[STOP] No cemetery posts found for this date.")
         sys.exit(0)
 
-    # 2 — Extract live links from API
     links = extract_links(cemetery_posts)
     print("\nLinks from API:")
     for label, url in links.items():
         print(f"  {label}: {url}")
 
-    # 3 — Get RRM LinkedIn via Playwright if missing
     if "RRM LI" not in links:
         print("\nRRM LI not in API — fetching via Playwright...")
-        # Find the FB+LI grouped post ID
         for post in cemetery_posts:
             platforms = [a["platform"] for a in post.get("accounts", [])]
             if "linkedin" in platforms and "facebook" in platforms:
-                post_id = post["id"]
+                post_id   = post["id"]
                 welton_li = links.get("Welton LI", "")
                 candidate = get_rrm_linkedin_via_playwright(post_id)
-                # Exclude Welton's known link
                 if candidate and candidate != welton_li:
                     links["RRM LI"] = candidate
                 elif candidate:
-                    # Both links found — pick the one that isn't Welton's
                     links["RRM LI"] = candidate
                 print(f"  RRM LI: {links.get('RRM LI', 'NOT FOUND')}")
                 break
 
-    # 4 — Find sheet row
+    print("\nConnecting to Google Sheet...")
+    spreadsheet, worksheet = get_worksheet()
+
     print("\nFinding row in Google Sheet...")
-    row_num = find_row_number(date_str)
+    row_num = find_row_number(worksheet, date_str)
     if not row_num:
         print(f"[STOP] Could not find Cemetery row for {date_str} in sheet.")
         sys.exit(1)
     print(f"Found at row {row_num}")
 
-    # 5 — Write to sheet
     print("\nWriting links to sheet...")
-    write_links_to_sheet(row_num, links)
+    write_links_to_sheet(spreadsheet, row_num, links)
 
     print("\n" + "=" * 58)
     print("  DONE — Links written to sheet.")

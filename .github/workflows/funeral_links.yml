@@ -1,0 +1,29 @@
+name: Funeral Home Blog Link Writer
+
+on:
+  schedule:
+    - cron: '15 15 * * 1'  # Every Monday 15:15 UTC = 8:15 AM PDT (UTC-7)
+  workflow_dispatch:        # Also allows manual trigger from GitHub
+
+jobs:
+  write-links:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install gspread google-auth playwright
+          playwright install chromium
+
+      - name: Run funeral home link writer
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: |
+          python "contentstudio_scheduler/Link Writer Content Studio/add_links_funeral.py"
