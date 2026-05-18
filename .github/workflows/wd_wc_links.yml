@@ -1,4 +1,4 @@
-name: Window Covering Blog Link Writer
+name: WD & WC Blog Link Writer
 
 on:
   schedule:
@@ -22,8 +22,8 @@ jobs:
           pip install gspread google-auth playwright
           playwright install chromium
 
-      - name: Run Window Covering link writer
+      - name: Run WD & WC link writer
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: |
-          python "contentstudio_scheduler/Link Writer Content Studio/add_links_window_covering.py"
+          python "contentstudio_scheduler/Link Writer Content Studio/add_links_wd_wc.py"

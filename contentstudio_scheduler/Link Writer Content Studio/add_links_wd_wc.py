@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Window Covering Blog — Live Link Writer
-Runs every Monday at 2:20 PM PDT via GitHub Actions.
+Windows & Doors / Window Covering Blog — Live Link Writer
+Runs every Monday at 2:15 PM PDT via GitHub Actions.
 Pulls live post links from ContentStudio (RRMathome workspace) and writes
 them to the PB Blogs 2026 Google Sheet.
 Two post slots: 1 PM PDT (20:00 UTC) and 2 PM PDT (21:00 UTC) — same row.
@@ -72,13 +72,13 @@ def fetch_all_posts():
     return list(seen.values())
 
 
-def get_window_covering_posts(date_str, all_posts):
-    """Return Window Covering posts at 1 PM PDT (20:00 UTC) or 2 PM PDT (21:00 UTC) on date_str."""
+def get_wd_wc_posts(date_str, all_posts):
+    """Return WD/WC posts at 1 PM PDT (20:00 UTC) or 2 PM PDT (21:00 UTC) on date_str."""
     return [
         p for p in all_posts
         if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T20:00")
             or p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T21:00"))
-        and "cover" in p.get("common", {}).get("content", {}).get("text", "").lower()
+        and "window" in p.get("common", {}).get("content", {}).get("text", "").lower()
     ]
 
 
@@ -177,7 +177,7 @@ def get_worksheet():
 
 
 def find_row_number(worksheet, date_str):
-    """Find the 1-based row number for the Window Covering row on date_str."""
+    """Find the 1-based row number for the WD/WC row on date_str."""
     sheet_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d")
     rows = worksheet.get_all_values()
 
@@ -191,7 +191,7 @@ def find_row_number(worksheet, date_str):
         return None
 
     for i in range(date_row_idx, min(date_row_idx + 15, len(rows))):
-        if len(rows[i]) > 2 and "cover" in rows[i][2].lower():
+        if len(rows[i]) > 2 and "window" in rows[i][2].lower():
             return i + 1
 
     return None
@@ -285,27 +285,27 @@ def main():
         sys.exit(1)
 
     print("=" * 58)
-    print(f"  Window Covering Blog — Live Link Writer")
+    print(f"  WD & WC Blog — Live Link Writer")
     print(f"  Date: {date_str}")
     print("=" * 58)
 
     print("\nFetching posts from ContentStudio...")
     all_posts = fetch_all_posts()
-    wc_posts = get_window_covering_posts(date_str, all_posts)
-    print(f"Found {len(wc_posts)} Window Covering post(s) at 1-2 PM PDT")
+    wd_wc_posts = get_wd_wc_posts(date_str, all_posts)
+    print(f"Found {len(wd_wc_posts)} WD/WC post(s) at 1-2 PM PDT")
 
-    if not wc_posts:
-        print("[STOP] No Window Covering posts found for this date.")
+    if not wd_wc_posts:
+        print("[STOP] No WD/WC posts found for this date.")
         sys.exit(0)
 
-    links = extract_links(wc_posts)
+    links = extract_links(wd_wc_posts)
     print("\nLinks from API:")
     for label, url in links.items():
         print(f"  {label}: {url}")
 
     if "RRMathome LI" not in links:
         print("\nRRMathome LI not in API — fetching via Playwright...")
-        for post in wc_posts:
+        for post in wd_wc_posts:
             platforms = [a["platform"] for a in post.get("accounts", [])]
             if "linkedin" in platforms and "facebook" in platforms:
                 post_id   = post["id"]
@@ -324,7 +324,7 @@ def main():
     print("\nFinding row in Google Sheet...")
     row_num = find_row_number(worksheet, date_str)
     if not row_num:
-        print(f"[STOP] Could not find Window Covering row for {date_str} in sheet.")
+        print(f"[STOP] Could not find WD/WC row for {date_str} in sheet.")
         sys.exit(1)
     print(f"Found at row {row_num}")
 
