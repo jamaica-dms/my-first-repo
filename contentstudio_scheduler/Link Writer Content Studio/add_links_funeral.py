@@ -159,7 +159,7 @@ def get_rrm_linkedin_via_playwright(post_id, welton_li_url, post_text=""):
 
 # ── Google Sheet helpers ───────────────────────────────────────────────────────
 def find_row_number(date_str):
-    """Find the 1-based row number for the Funeral Homes row on date_str."""
+    """Find the 1-based row number and existing cell values for the Funeral Homes row on date_str."""
     sheet_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d")
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={SHEET_GID}"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -175,18 +175,29 @@ def find_row_number(date_str):
             break
 
     if date_row_idx is None:
-        return None
+        return None, {}
 
     # Search from date row onward for Funeral Homes
     for i in range(date_row_idx, min(date_row_idx + 15, len(rows))):
         if "funeral" in rows[i][2].lower():
-            return i + 1  # 1-based
+            row_num = i + 1  # 1-based
+            row_data = rows[i]
+            # Map column letters to existing text (F=5, G=6, H=7, I=8, 0-indexed)
+            existing = {}
+            col_map = {"F": 5, "G": 6, "H": 7, "I": 8}
+            for col, idx in col_map.items():
+                if idx < len(row_data):
+                    existing[f"{col}{row_num}"] = row_data[idx].strip()
+            return row_num, existing
 
-    return None
+    return None, {}
 
 
-def write_links_to_sheet(row_num, links):
+def write_links_to_sheet(row_num, links, existing=None):
     from playwright.sync_api import sync_playwright
+
+    if existing is None:
+        existing = {}
 
     columns = {
         f"F{row_num}": [("Welton FB", links.get("Welton FB")), ("RRM FB", links.get("RRM FB"))],
@@ -204,7 +215,7 @@ def write_links_to_sheet(row_num, links):
         )
         page = browser.pages[0] if browser.pages else browser.new_page()
         page.set_viewport_size({"width": 1800, "height": 900})
-        page.goto(SHEET_URL)
+        page.goto(SHEET_URL, timeout=60000)
         time.sleep(6)
 
         for cell_ref, channel_links in columns.items():
@@ -213,7 +224,9 @@ def write_links_to_sheet(row_num, links):
                 print(f"  [SKIP] {cell_ref} — no links available")
                 continue
 
-            print(f"  Writing {cell_ref}: {[t for t, _ in valid]}")
+            has_existing = bool(existing.get(cell_ref, "").strip())
+            mode = "append" if has_existing else "replace"
+            print(f"  Writing {cell_ref} [{mode}]: {[t for t, _ in valid]}")
 
             name_box = page.locator('[id="t-name-box"], .name-box, [aria-label*="Name Box"]').first
             name_box.click(timeout=5000)
@@ -224,7 +237,13 @@ def write_links_to_sheet(row_num, links):
 
             page.keyboard.press("F2")
             time.sleep(0.5)
-            page.keyboard.press("Control+a")
+            if has_existing:
+                # Move to end of existing content and add separator
+                page.keyboard.press("End")
+                time.sleep(0.2)
+                page.keyboard.type(", ")
+            else:
+                page.keyboard.press("Control+a")
             time.sleep(0.3)
 
             for i, (text, url) in enumerate(valid):
@@ -295,16 +314,21 @@ def main():
                     links["RRM LI"] = candidate
                 print(f"  RRM LI: {links.get('RRM LI', 'NOT FOUND')}")
                 break
+        time.sleep(5)  # Let Edge release the profile lock before sheet writing
 
     print("\nFinding row in Google Sheet...")
-    row_num = find_row_number(date_str)
+    row_num, existing = find_row_number(date_str)
     if not row_num:
         print(f"[STOP] Could not find Funeral Homes row for {date_str} in sheet.")
         sys.exit(1)
     print(f"Found at row {row_num}")
+    if existing:
+        for cell, val in existing.items():
+            if val:
+                print(f"  Existing content in {cell}: {val[:60]}")
 
     print("\nWriting links to sheet...")
-    write_links_to_sheet(row_num, links)
+    write_links_to_sheet(row_num, links, existing)
 
     print("\n" + "=" * 58)
     print("  DONE — Links written to sheet.")
