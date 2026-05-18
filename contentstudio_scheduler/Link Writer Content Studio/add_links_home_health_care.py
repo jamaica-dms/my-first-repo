@@ -73,10 +73,10 @@ def fetch_all_posts():
 
 
 def get_home_health_care_posts(date_str, all_posts):
-    """Return posts at 1 AM PDT (08:00 UTC) or 2 PM PDT (21:00 UTC) on date_str."""
+    """Return posts at 11 AM PDT (18:00 UTC) or 2 PM PDT (21:00 UTC) on date_str."""
     return [
         p for p in all_posts
-        if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T08:00")
+        if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T18:00")
             or p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T21:00"))
     ]
 
@@ -291,7 +291,7 @@ def main():
     print("\nFetching posts from ContentStudio...")
     all_posts = fetch_all_posts()
     hhc_posts = get_home_health_care_posts(date_str, all_posts)
-    print(f"Found {len(hhc_posts)} Home Health Care post(s) at 1 AM / 2 PM PDT")
+    print(f"Found {len(hhc_posts)} Home Health Care post(s) at 11 AM / 2 PM PDT")
 
     if not hhc_posts:
         print("[STOP] No Home Health Care posts found for this date.")
