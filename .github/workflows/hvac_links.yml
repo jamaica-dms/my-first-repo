@@ -1,0 +1,29 @@
+name: HVAC Blog Link Writer
+
+on:
+  schedule:
+    - cron: '15 18 * * 1'  # Every Monday 18:15 UTC = 11:15 AM PDT (UTC-7)
+  workflow_dispatch:
+
+jobs:
+  write-links:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install gspread google-auth playwright
+          playwright install chromium
+
+      - name: Run HVAC link writer
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: |
+          python "contentstudio_scheduler/Link Writer Content Studio/add_links_hvac.py"

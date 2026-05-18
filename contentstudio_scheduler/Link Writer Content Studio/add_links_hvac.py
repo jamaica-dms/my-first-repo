@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Flooring Blog — Live Link Writer
-Runs every Monday at 1:15 PM PDT via GitHub Actions.
+HVAC Blog — Live Link Writer
+Runs every Monday at 11:15 AM PDT via GitHub Actions.
 Pulls live post links from ContentStudio (RRMathome workspace) and writes
 them to the PB Blogs 2026 Google Sheet.
-Two post slots: noon PDT (19:00 UTC) and 1 PM PDT (20:00 UTC) — same row.
+Two post slots: 10 AM PDT (17:00 UTC) and 11 AM PDT (18:00 UTC) — same row.
 """
 
 import sys
@@ -55,18 +55,15 @@ def cs_get(path):
 
 
 def fetch_all_posts():
-    # Collect posts from all statuses; for duplicates keep the version with post_link populated
-    seen = {}  # post_id → post
+    seen = {}
     for status in ("scheduled", "published", "review", "draft"):
         for page in range(1, 20):
             try:
                 data = cs_get(f"/workspaces/{WS_ID}/posts?status={status}&page={page}")
                 for p in data.get("data", []):
                     pid = p.get("id")
-                    existing = seen.get(pid)
-                    # Prefer the version where any account has a non-empty post_link
                     has_link = any(a.get("post_link") for a in p.get("accounts", []))
-                    if not existing or has_link:
+                    if pid not in seen or has_link:
                         seen[pid] = p
                 if page >= data.get("last_page", 1):
                     break
@@ -75,13 +72,13 @@ def fetch_all_posts():
     return list(seen.values())
 
 
-def get_flooring_posts(date_str, all_posts):
-    """Return flooring posts at 10-11 AM PDT (17:00-18:00 UTC) on date_str."""
+def get_hvac_posts(date_str, all_posts):
+    """Return HVAC posts at 10 AM PDT (17:00 UTC) or 11 AM PDT (18:00 UTC) on date_str."""
     return [
         p for p in all_posts
         if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T17:00")
             or p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T18:00"))
-        and "floor" in p.get("common", {}).get("content", {}).get("text", "").lower()
+        and "hvac" in p.get("common", {}).get("content", {}).get("text", "").lower()
     ]
 
 
@@ -176,7 +173,7 @@ def get_worksheet():
 
 
 def find_row_number(worksheet, date_str):
-    """Find the 1-based row number for the Flooring row on date_str."""
+    """Find the 1-based row number for the HVAC row on date_str."""
     sheet_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d")
     rows = worksheet.get_all_values()
 
@@ -190,14 +187,13 @@ def find_row_number(worksheet, date_str):
         return None
 
     for i in range(date_row_idx, min(date_row_idx + 15, len(rows))):
-        if len(rows[i]) > 2 and "flooring" in rows[i][2].lower():
+        if len(rows[i]) > 2 and "hvac" in rows[i][2].lower():
             return i + 1
 
     return None
 
 
 def write_hyperlink_cell(spreadsheet, row_num, col_letter, items):
-    """Write items as rich text with hyperlinks into a single cell via Sheets API."""
     col_idx = ord(col_letter.upper()) - ord('A')
     row_idx = row_num - 1
 
@@ -285,27 +281,27 @@ def main():
         sys.exit(1)
 
     print("=" * 58)
-    print(f"  Flooring Blog — Live Link Writer")
+    print(f"  HVAC Blog — Live Link Writer")
     print(f"  Date: {date_str}")
     print("=" * 58)
 
     print("\nFetching posts from ContentStudio...")
     all_posts = fetch_all_posts()
-    flooring_posts = get_flooring_posts(date_str, all_posts)
-    print(f"Found {len(flooring_posts)} flooring post(s) at 10-11 AM PDT")
+    hvac_posts = get_hvac_posts(date_str, all_posts)
+    print(f"Found {len(hvac_posts)} HVAC post(s) at 10-11 AM PDT")
 
-    if not flooring_posts:
-        print("[STOP] No flooring posts found for this date.")
+    if not hvac_posts:
+        print("[STOP] No HVAC posts found for this date.")
         sys.exit(0)
 
-    links = extract_links(flooring_posts)
+    links = extract_links(hvac_posts)
     print("\nLinks from API:")
     for label, url in links.items():
         print(f"  {label}: {url}")
 
     if "RRMathome LI" not in links:
         print("\nRRMathome LI not in API — fetching via Playwright...")
-        for post in flooring_posts:
+        for post in hvac_posts:
             platforms = [a["platform"] for a in post.get("accounts", [])]
             if "linkedin" in platforms and "facebook" in platforms:
                 post_id   = post["id"]
@@ -324,7 +320,7 @@ def main():
     print("\nFinding row in Google Sheet...")
     row_num = find_row_number(worksheet, date_str)
     if not row_num:
-        print(f"[STOP] Could not find Flooring row for {date_str} in sheet.")
+        print(f"[STOP] Could not find HVAC row for {date_str} in sheet.")
         sys.exit(1)
     print(f"Found at row {row_num}")
 
