@@ -73,12 +73,11 @@ def fetch_all_posts():
 
 
 def get_home_care_posts(date_str, all_posts):
-    """Return Home Care posts at 9 AM PDT (16:00 UTC) or 12 PM PDT (19:00 UTC) on date_str."""
+    """Return posts at 9 AM PDT (16:00 UTC) or 12 PM PDT (19:00 UTC) on date_str."""
     return [
         p for p in all_posts
         if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T16:00")
             or p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T19:00"))
-        and "home care" in p.get("common", {}).get("content", {}).get("text", "").lower()
     ]
 
 
