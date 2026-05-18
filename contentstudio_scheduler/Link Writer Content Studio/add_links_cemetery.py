@@ -133,7 +133,7 @@ def get_rrm_linkedin_via_playwright(post_id):
 # ── Google Sheets helpers ──────────────────────────────────────────────────────
 def get_worksheet():
     creds = Credentials.from_service_account_info(
-        json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"]),
+        json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"], strict=False),
         scopes=SCOPES,
     )
     client = gspread.authorize(creds)
