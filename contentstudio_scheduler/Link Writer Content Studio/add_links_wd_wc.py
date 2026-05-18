@@ -73,12 +73,12 @@ def fetch_all_posts():
 
 
 def get_wd_wc_posts(date_str, all_posts):
-    """Return WD/WC posts at 1 PM PDT (20:00 UTC) or 2 PM PDT (21:00 UTC) on date_str."""
+    """Return WD/WC posts at 12 PM PDT (19:00 UTC), 1 PM PDT (20:00 UTC), or 2 PM PDT (21:00 UTC) on date_str."""
     return [
         p for p in all_posts
-        if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T20:00")
+        if (p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T19:00")
+            or p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T20:00")
             or p.get("scheduling", {}).get("execute_time", "").startswith(f"{date_str}T21:00"))
-        and "window" in p.get("common", {}).get("content", {}).get("text", "").lower()
     ]
 
 
