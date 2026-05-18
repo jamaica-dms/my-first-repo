@@ -358,6 +358,21 @@ def phase3_contentstudio(date_str, sheet_data, img_path, docx_path):
         print("  [WARN] No posts found in ContentStudio for this date.")
         return
 
+    # Day of week — must be Mon–Fri
+    post_day = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A")
+    log(post_day not in ("Saturday", "Sunday"), "Posting day is Mon-Fri", post_day)
+
+    # Duplicate detection — flag if any channel has more than one post on this date
+    print()
+    channel_post_counts = {}
+    for post in date_posts:
+        for account in post.get("accounts", []):
+            key = f"{account['platform']}/{account['name']}"
+            channel_post_counts[key] = channel_post_counts.get(key, 0) + 1
+    duplicates = {k: v for k, v in channel_post_counts.items() if v > 1}
+    log(not duplicates, "No duplicate posts",
+        "Duplicates found: " + ", ".join(f"{k} x{v}" for k, v in duplicates.items()) if duplicates else "")
+
     # Map posts to channels
     found = {}
     for post in date_posts:
@@ -385,6 +400,7 @@ def phase3_contentstudio(date_str, sheet_data, img_path, docx_path):
         group_ok       = len(post_platforms) == 1 or allowed_group
         log(group_ok, "Post grouping OK",
             f"Incorrectly grouped with: {', '.join(post_platforms)}" if not group_ok else "")
+
         dt  = datetime.fromisoformat(post["scheduling"]["execute_time"].replace("Z", "+00:00"))
         pst = dt - PST_OFFSET
 
@@ -424,15 +440,17 @@ def phase3_contentstudio(date_str, sheet_data, img_path, docx_path):
                 log(not missing_tags, "Hashtags match",
                     f"missing: {' '.join(missing_tags)}" if missing_tags else "")
 
-            # Copy — check first meaningful sentence appears in post
+            # Full copy check — normalize both sides and compare entire body
             copy_clean = strip_meta(normalize_text(copy_block))
-            # Replace Twitter link preambles "(1) Name (@handle) / X" with "@handle"
             copy_clean = re.sub(r"\(\d+\)\s+[^(]+\(@(\w+)\)\s*/\s*X", r"@\1", copy_clean)
             post_clean = strip_meta(post_norm)
-            first_sent = copy_clean.split(".")[0].strip()[:80]
-            copy_ok    = first_sent.lower() in post_clean.lower() if first_sent else False
-            log(copy_ok, "Copy matches Word doc (key phrase check)",
-                f"Expected: '{first_sent}'" if not copy_ok else "")
+            # Split into sentences and check each one appears in the post
+            sentences  = [s.strip() for s in re.split(r"(?<=[.!?])\s+", copy_clean) if len(s.strip()) > 20]
+            missing_sentences = [s for s in sentences if s.lower() not in post_clean.lower()]
+            copy_ok = len(missing_sentences) == 0
+            log(copy_ok, "Full copy matches Word doc",
+                f"Missing: '{missing_sentences[0][:80]}'" if missing_sentences else "")
+
 
         # Image
         images = post.get("common", {}).get("content", {}).get("media", {}).get("images", [])
@@ -471,6 +489,10 @@ def main():
     sheet_data = phase1_read_sheet(date_str)
     if not sheet_data:
         print("\n[STOP] No HCP article scheduled for this date in the sheet.")
+        sys.exit(0)
+
+    if sheet_data.get("medium", "").strip().lower() == "video":
+        print(f"\n[SKIP] Medium is Video — QA only runs for Article rows.")
         sys.exit(0)
 
     img_path, docx_path = phase2_folder_and_website(sheet_data)
