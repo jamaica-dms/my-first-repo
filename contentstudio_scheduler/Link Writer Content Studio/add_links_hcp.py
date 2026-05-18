@@ -104,17 +104,11 @@ def get_worksheet():
 
 
 def find_row_number(worksheet, date_str):
-    """Find the 1-based row number for date_str in column A."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    candidates = {
-        dt.strftime("%m/%d"),
-        dt.strftime("%-m/%-d"),
-        dt.strftime("%m/%d/%Y"),
-        dt.strftime("%-m/%-d/%Y"),
-    }
+    """Find the 1-based row number containing date_str in any column."""
+    sheet_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d")
     rows = worksheet.get_all_values()
     for i, row in enumerate(rows):
-        if row[0].strip() in candidates:
+        if any(cell.strip() == sheet_date for cell in row):
             return i + 1
     return None
 
@@ -230,7 +224,8 @@ def main():
 
     print("\nFinding row in Google Sheet...")
     rows_preview = worksheet.get_all_values()
-    print(f"  First 5 col-A values: {[r[0] for r in rows_preview[:5]]}")
+    for idx, r in enumerate(rows_preview[:8]):
+        print(f"  Row {idx+1}: {r[:6]}")
     row_num = find_row_number(worksheet, date_str)
     if not row_num:
         print(f"[STOP] Could not find row for {date_str} in sheet.")
