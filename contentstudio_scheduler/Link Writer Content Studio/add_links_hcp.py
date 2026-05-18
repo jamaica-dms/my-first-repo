@@ -229,6 +229,8 @@ def main():
     spreadsheet, worksheet = get_worksheet()
 
     print("\nFinding row in Google Sheet...")
+    rows_preview = worksheet.get_all_values()
+    print(f"  First 5 col-A values: {[r[0] for r in rows_preview[:5]]}")
     row_num = find_row_number(worksheet, date_str)
     if not row_num:
         print(f"[STOP] Could not find row for {date_str} in sheet.")
